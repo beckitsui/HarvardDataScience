@@ -1,0 +1,518 @@
+---
+title: "ML-Capstone-Housing"
+author: "Becky Xu"
+date: "2023-11-30"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+GRADING RUBRICS:
+* an introduction/overview/executive summary section that describes the dataset and variables, and summarizes the goal of the project and key steps that were performed;  
+
+* a methods/analysis section that explains the process and techniques used, including data cleaning, data exploration and visualization, insights gained, and your modeling 
+approaches (you must use at least two different models or algorithms);  
+
+* a results section that presents the modeling results and discusses the model performance; and. 
+ 
+* a conclusion section that gives a brief summary of the report, its potential impact, its limitations, and future work.  
+
+* a references section that cites any resources (datasets, published articles, etc) used in your work, if applicable.  
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Executive Summary
+
+The aim of this project is to predict median housing values in Boston using various machine learning algorithms.
+The Boston Housing dataset includes 13 qualitative and quantitaive features that can be used to predict the median housing value (feature name: medv).
+I will explore LASSO and Random Forest models for this machine learning exercise
+
+## Data Summary: Boston Housing Dataset
+#### Source and Usage
+* Origin: The dataset was collated by the U.S Census Service, focusing on housing in Boston, Massachusetts.
+* Published by: Harrison, D. and Rubinfeld, D.L. in their study on 'Hedonic prices and the demand for clean air', published in the Journal of Environmental Economics & Management (1978).
+* Access: Available from the StatLib archive (http://lib.stat.cmu.edu/datasets/boston).
+
+#### Dataset Overview
+* Size: Relatively small, with only 506 cases.
+* Attributes: The dataset comprises 14 attributes for each case.
+
+#### Attributes Description
+1. CRIM     per capita crime rate by town  
+2. ZN       proportion of residential land zoned for lots over 25,000 sq.ft.
+3. INDUS    proportion of non-retail business acres per town. 
+4. CHAS     Charles River dummy variable (= 1 if tract bounds river; 0 otherwise). 
+5. NOX      nitric oxides concentration (parts per 10 million). 
+6. RM       average number of rooms per dwelling. 
+7. AGE      proportion of owner-occupied units built prior to 1940. 
+8. DIS      weighted distances to five Boston employment centres. 
+9. RAD      index of accessibility to radial highways. 
+10. TAX      full-value property-tax rate per $10,000. 
+11. PTRATIO  pupil-teacher ratio by town. 
+12. B        1000(Bk - 0.63)^2 where Bk is the proportion of blacks by town.
+13. LSTAT    % lower status of the population. 
+14. MEDV     Median value of owner-occupied homes in $1000's. 
+
+* Censoring in MEDV: The median value of owner-occupied homes (MEDV) appears to be capped at $50,000. This is inferred from:
+16 cases with a median price exactly $50,000.
+15 cases with prices between $40,000 and $50,000.
+ 
+* This dataset is a fundamental resource in algorithm benchmarking, particularly in the field of housing economics and environmental studies.
+
+## Goal of the project and key steps that were performed
+
+* Goal: To use regression method predict median value of real estate (MEDV) using social, economic, and environmental features. 
+
+* Key Steps: 
+1. Build regression model (LASSO) with selected orginial features
+2. Improve regression model (LASSO) with transformed (e.g. log, square, sqrt...) selected orginial features
+3. Further improve regression model (LASSO) with interaction term
+
+```{r}
+library(caret)
+library(dplyr)
+library(tidyr)
+library(GGally)
+library(glmnet)
+library(magrittr)
+library(MASS)
+library(corrplot)
+
+housing_raw <- read.csv("BostonHousing.csv")
+
+housing_raw$index <- seq_along(housing_raw[,1])
+set.seed(2023)  # for reproducibility
+train_index <- createDataPartition(housing_raw$index, times = 1, p = 0.8, list = FALSE)
+train_data <- housing_raw[train_index, ]
+test_data <- housing_raw[-train_index, ]
+```
+----------------------------------------
+
+# Methods/Analysis
+## Exploratory Data Analysis & Visualizations
+
+Overview of the data set
+
+```{r}
+summary(train_data)
+```
+
+```{r}
+colnames(train_data)
+nrow(train_data)
+```
+
+
+plotting scatter plot for all features to view relationships
+```{r, warning=FALSE, message=FALSE}
+options(repr.plot.width = 40, repr.plot.height = 40)
+
+train_data |>
+  #select(-c('chas', 'b')) |> 
+  ggpairs(
+        mapping = ggplot2::aes(size = 0.005),
+        lower = list(continuous = wrap("points", alpha = 0.3, size=0.1, color = 'blue')), 
+        diag = list(continuous = wrap("barDiag", alpha = 0.3)),  
+        font.label = list(size = 4, face = "bold"),
+        ggtheme = theme_minimal()
+       )
+```
+
+plotting correlation matrix for all features
+```{r}
+# correlation matrix plotting
+cor_plot_matrix <- 
+  cor(train_data[,c("crim","zn","indus", "chas", "nox","rm","age","dis","rad","tax",
+                    "ptratio","lstat","medv")])
+
+corrplot(cor_plot_matrix, method = 'color', type='upper', 
+         order = 'hclust',tl.col = "black", tl.srt = 45)
+```
+
+
+```{r}
+#view the correlation values 
+cor_plot_matrix
+```
+
+Here are the key insights I got from the scatter plot matrix and correlation matrix, 
+which demonstrates the relationships between the all the selected features.
+
+Notably, features "rm" (average number of rooms per dwelling) 
+and "lstat" (% lower status of the population) showed significant correlations (0.72998473 and -0.75353341) 
+with "medv" (median value of owner-occupied homes).
+
+Intuitively, this result makes sense. 
+Housing value is dependent on the size of the unit, more rooms equals to larger area usually.
+Lower status of the population also can indicate that the housing is more affordable or at a cheaper price comparing to other units.
+
+---------------------------------------
+
+# ML Model Development
+* The goal is to build two models :
++ LASSO Regression
++ Random Forest
+
+
+#### Model Evaluation Methods
+
+RMSE function
+```{r}
+RMSE <- function(true, predict) {
+  differences <- true - predict
+  differences <- differences[!is.na(differences)]
+  sqrt(mean(differences^2))
+}
+```
+
+R^2 function 
+* proportion of the variance for the dependent variable that's explained by the independent variables in a regression model.
+```{r}
+R2 <- function(true, predict){
+  #Total Sum of Squares (TSS)
+  tss <- sum((true - mean(true))^2)
+  #Residual Sum of Squares (RSS)
+  rss <- sum((true - predict)^2)
+  1 - (rss / tss)
+}
+```
+
+
+## LASSO - Base Model
+* First create a baseline LASSO model without any feature engineering.  
+* Then test transformations for better fitting.
+
+```{r}
+#create model "cv_model_base" with all original features
+train_data_base <- data.frame(scale(train_data[c("crim","zn","indus", "chas", "nox","rm",
+                                                 "age","dis","rad","tax","ptratio","lstat")]))
+train_data_base$medv <- train_data$medv
+
+#prepare a matrix for glmnet
+x_train_base <- model.matrix(medv ~ crim + zn + indus + chas + nox + rm + age + dis + 
+                               rad + tax + ptratio + lstat - 1, train_data_base)
+y_train_base <- train_data$medv
+
+#use cross validation to find the optimal lambda 
+cv_model_base <- cv.glmnet(x_train_base, y_train_base, alpha=1)
+
+lambda_base <- cv_model_base$lambda.min
+```
+
+testing base model on the test set
+```{r}
+test_data_base <- data.frame(scale(test_data[c("crim","zn","indus", "chas", "nox","rm",
+                                               "age","dis","rad","tax","ptratio","lstat")]))
+test_data_base$medv <- test_data$medv
+
+x_test_base <- model.matrix(medv ~ crim + zn + indus + chas + nox + rm + age + dis + 
+                              rad + tax + ptratio + lstat -1, test_data_base)
+
+predict_base <- predict(cv_model_base, s=lambda_base, newx = x_test_base)
+
+y_test <- test_data$medv
+```
+
+#### RMSE: LASSO Base Model Performance
+```{r}
+RMSE(y_test, predict_base)
+R2(y_test, predict_base)
+```
+
+---------------------------------------
+
+## LASSO - Model Improvement with Feature Transformations
+
+##### Feature Transformations
+first, look at which variable is more closely related to medv, and start transforming the feature by the order
+```{r}
+library(dplyr)
+cor_plot_ranked <- data.frame(cor_plot_matrix) 
+cor_plot_ranked['medv']|>
+  arrange(desc(abs(medv))) 
+```
+
+1. create a list of function to transform features
+```{r}
+transformations <- list(
+  og = function(x) x,
+  log = function(x) {ifelse(x > 0, log(x+1), x)},  
+  sqrt = function(x) sqrt(x),
+  square = function(x) x^2
+)
+```
+
+2. create a function to apply transformation, fit the LASSO model, and return performance results 
+```{r}
+library(glmnet)
+
+test_transformation <- function(data, feature, transformations, response = "medv") {
+  results <- list()
+  for (trans_name in names(transformations)) {
+    # apply transformation for feature
+    data[[paste0(feature, "_", trans_name)]] <- 
+      transformations[[trans_name]](data[[feature]])
+    
+    # prepare data for LASSO
+    x <- model.matrix(reformulate(termlabels = paste0(feature, "_", trans_name), 
+                                  response = response), data)
+    y <- data[[response]]
+    
+    # fit LASSO model
+    cv_model <- cv.glmnet(x, y, alpha = 1)
+    
+    # store results
+    results[[trans_name]] <- min(cv_model$cvm)  # store min. cross-validation error
+  }
+  return(results)
+}
+
+```
+
+3. batch testing the feature transformation function on selected features
+
+```{r}
+features <- c("crim", "zn", "indus", "nox", "rm", "age", "dis", "rad", "tax", "ptratio", 
+              "lstat") #"chas" is removed
+
+all_results <- list()
+
+for (feature in features) {
+  all_results[[feature]] <- test_transformation(train_data, feature, transformations)
+}
+all_results
+```
+Result from running codes above, here are the transformation for each feature that has the lowest cross-validation error.
+* crim -> log
+* zn -> log 
+* indus -> log
+* nox -> sqrt - differences are too small, may ignore
+* rm -> square
+* age -> square
+* dis -> log
+* rad -> square - differences are too small, may ignore
+* tax -> log - differences are too small, may ignore
+* ptratio -> square - differences are too small, may ignore
+* lstat -> log
+
+#### Feature Engineering Test
+```{r}
+transforming_train <- train_data |>
+  mutate(log_crim = log(crim + 1),
+          log_zn = log(zn + 1),
+          log_indus = log(indus + 1),
+          sq_rm = rm^2,
+          sq_age = age^2,
+          log_dis = log(dis+1),
+          log_lstat = log(lstat + 1))
+  
+transformed_train_data <- transforming_train[c('log_crim','log_zn','log_indus','sq_rm',
+                                               'sq_age','log_dis','log_lstat','chas',
+                                               'tax','ptratio','nox','rad')] |>
+  scale() |>
+  data.frame()
+
+transformed_train_data$medv = train_data$medv
+head(transformed_train_data)
+```
+
+testing transformed model on the test set
+
+```{r}
+#prepare a matrix for glmnet
+x_train_transformed <- model.matrix(medv ~ log_crim + log_zn + log_indus + sq_rm + 
+                                      sq_age + log_dis + log_lstat + rad + chas + 
+                                      tax + ptratio + nox- 1, 
+                                    transformed_train_data)
+y_train <- train_data$medv
+
+#use cross validation to find the optimal lambda 
+cv_model_transformed <- cv.glmnet(x_train_transformed, y_train, alpha=1)
+lambda_transformed <- cv_model_transformed$lambda.min
+```
+
+```{r}
+#prepare test set for prediction
+transforming_test <- test_data |>
+  mutate(log_crim = log(crim + 1),
+          log_zn = log(zn + 1),
+          log_indus = log(indus + 1),
+          sq_rm = rm^2,
+          sq_age = age^2,
+          log_dis = log(dis+1),
+          log_lstat = log(lstat + 1))
+  
+transformed_test_data <- transforming_test[c('log_crim','log_zn','log_indus','sq_rm','sq_age','log_dis','log_lstat','chas','tax',
+                                             'ptratio','nox','rad')] |>
+  scale() |>
+  data.frame()
+
+transformed_test_data$medv <- test_data$medv
+
+x_test_transformed <- model.matrix(medv ~ log_crim + log_zn + log_indus + sq_rm + sq_age + log_dis + 
+                                     log_lstat + rad + chas + tax + ptratio + nox - 1, 
+                                   transformed_test_data)
+
+predict_LASSO_transformed <- predict(cv_model_transformed,
+                               newx = x_test_transformed)
+
+y_test <- test_data$medv
+```
+
+#### RMSE for LASSO Model with Transformed Feature
+```{r}
+RMSE(y_test, predict_LASSO_transformed)
+R2(y_test, predict_LASSO_transformed)
+```
+base model:
+RMSE: ~5.8
+R-squared ~0.57
+
+with transformed model
+RMSE: ~5.6
+R-squared: ~0.60
+
+----------------------------------------
+
+## Random Forest Model
+```{r}
+library(randomForest)
+
+select_features_rf <- c("crim","zn","indus", "chas", "nox","rm","age","dis","rad","tax",
+                        "ptratio","lstat", "medv")
+
+train_data_rf <- train_data[select_features_rf]
+
+# create cross validation parameter / train control
+train_control <- trainControl(method = 'cv', number = 5)
+
+# create tuning grid
+tune_grid <- expand.grid(mtry = c(2, 3, 4, 5, 6))
+
+# train Random Forest model with tuned parameters
+rf_model_tuned <- train(medv ~ ., 
+                        data = train_data_rf,
+                        method = 'rf',
+                        trControl = train_control,
+                        tuneGrid = tune_grid)
+
+rf_model_tuned$bestTune$mtry
+
+mtry <- rf_model_tuned$bestTune$mtry
+```
+
+
+```{r}
+# build Random Forest model with original data
+rf_model <- randomForest(medv ~ ., 
+                         data = train_data_rf, 
+                         ntree = 500, 
+                         mtry = mtry)
+
+# view model information 
+print(rf_model)
+importance(rf_model)
+# plotting feature importance
+varImpPlot(rf_model) 
+```
+
+```{r}
+# test Random Forest model by predicting test set
+test_data_rf <- test_data[select_features_rf]
+predictions_rf <- predict(rf_model, test_data_rf)
+
+# get RMSE of the Random Forest model 
+rf_result <- data.frame(medv_actual = test_data_rf$medv,
+                        medv_predicted = predictions_rf
+                        )
+
+RMSE(rf_result$medv_actual, rf_result$medv_predicted)
+R2(rf_result$medv_actual, rf_result$medv_predicted)
+```
+The RMSE is around 5.0 with the tuned Random Forest model.
+
+I've tried standardizing all the features except for medv using scale() before training Random Forest model, and the RMSE is ~5.3, so I am using original features
+
+----------------------------------------
+# Ensemble
+
+```{r}
+ensemble_predictions <- (predictions_rf + predict_LASSO_transformed) / 2
+
+RMSE(test_data_rf$medv, ensemble_predictions)
+R2(test_data_rf$medv, ensemble_predictions)
+```
+The RMSE for the ensemble model is around 5.1, higher than the Random Forest model alone
+
+----------------------------------------
+
+# Results section
+-> presents the modeling results and discusses the model performance; and. 
+
+#### LASSO Regression 
+Base Model: The base LASSO model uses original features without any transformations, and the RMSE of the model is approximately 5.8 with R-squared value around 0.57.
+
+Transformed Model: After applying feature transformations, the RMSE of the updated model improved to about 5.6 with R-squared value increased to approximately 0.60, 
+showing some effectivenss of feature transformtations for model outcome improvement.
+
+#### Random Forest
+Random Forest model with tuned feature (mtry) using cross validation yield RMSE of around 5.0 and R-squared around 0.68, much better prediction than the LASSO models.
+
+Feature importance analysis indicated that 'rm', 'lstat', and 'ptratio' were the most influential features, which is similar to the EDA finding.
+
+When testing Random Forest model with standardization of features, I found that using original features gives better results, so that is the model I kept in this report.
+
+#### Ensemble Model
+
+The ensemble model that combined the LASSO and Random Forest models, resulted in an RMSE of approximately 5.13 and R-squared value around 0.67.
+Hence the model did not outperform the Random Forest model.
+
+----------------------------------------
+
+# Conclusion section
+
+#### Summary of Results
+The aim of this project is to predict median housing values in Boston using various machine learning algorithms.
+
+With the Boston Housing Dataset, I selected the following features to predict MEDV (Median value of owner-occupied homes in $1000's.): 
+1. CRIM     per capita crime rate by town  
+2. ZN       proportion of residential land zoned for lots over 25,000 sq.ft.
+3. INDUS    proportion of non-retail business acres per town. 
+4. CHAS     Charles River dummy variable (= 1 if tract bounds river; 0 otherwise). 
+5. NOX      nitric oxides concentration (parts per 10 million). 
+6. RM       average number of rooms per dwelling. 
+7. AGE      proportion of owner-occupied units built prior to 1940. 
+8. DIS      weighted distances to five Boston employment centres. 
+9. RAD      index of accessibility to radial highways. 
+10. TAX      full-value property-tax rate per $10,000. 
+11. PTRATIO  pupil-teacher ratio by town. 
+12. LSTAT    % lower status of the population. 
+
+After building 2 LASSO models, 1 Random Forest model, and 1 Ensemble Model, Random Forest model stood out as having most predicting power in this machine learning project, with 'rm', 'lstat', and 'ptratio' as the most influential features.
+The LASSO model's performance improvement with feature transformations underscores the importance of feature engineering in predictive modeling.
+
+#### Limitation & Potential Future Improvement
+Predicting housing prices is complex. 
+There are many other features that could have been included in the training model, such as areas of the unit, the floor numbers, most recent renovation date, transportation access, number of parks nearby, noise levels, proximity to schools, neighborhood characteristics, land's environmental attributes etc.
+With those features, the predicting power of the ml model shall increase.
+Also, this dataset is relatively old, published in the late 90s, and small in size, so the result is perhaps less relevant to the current housing market.
+
+----------------------------------------
+
+# Reference:
+source: https://www.cs.toronto.edu/~delve/data/boston/bostonDetail.html
+
+
+```{r}
+library(knitr)
+
+# Replace "your_file.Rmd" with the path to your Rmd file
+rmd_file <- "ML-Capstone-Housing.Rmd"
+r_script <- "ML-Capstone-Housing.R" # Output R script filename
+
+# Extract R code from the Rmd file and write to an R script
+purl(rmd_file, output = r_script)
+```
+
